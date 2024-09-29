@@ -8,6 +8,7 @@ using System.Windows.Forms;
 using ZXing;
 using Tesseract;
 using System.Text.RegularExpressions;
+using System.Drawing.Imaging;
 
 namespace ScannerTestApp
 {
@@ -70,8 +71,6 @@ namespace ScannerTestApp
             {
                 var filename = Path.GetFileName(filePath);
                 var bitmap = (Bitmap)Image.FromFile(filePath);
-
-                var Text = ReadText(filePath, filename, bitmap);
                 try
                 {
                     using (bitmap)
@@ -79,8 +78,15 @@ namespace ScannerTestApp
                         var result = barcodeReader.Decode(bitmap);
                         if (result != null)
                         {
-                            if (BarcodeSeparator.Equals(result.Text))
+                            if (!BarcodeSeparator.Equals(result.Text))
                             {
+                                Bitmap preBarcodeProcessing = PreprocessForBarcode(bitmap);
+                                result = barcodeReader.Decode(preBarcodeProcessing);
+
+                            }
+                            if(BarcodeSeparator.Equals(result.Text))
+                            {
+                                var Text = ReadText(filePath, filename, bitmap);
                                 if (Text == "InsuranceDataServicesSeparatorSheet")
                                 {
                                     if (strList.Length > 0)
@@ -91,8 +97,10 @@ namespace ScannerTestApp
                                 }
                             }
                         }
-
-                        strList.Append(filename + ",");
+                        else
+                        {
+                            lst.Add($"{filePath}");
+                        }
                     }
                 }
                 catch (Exception ex)
@@ -108,6 +116,15 @@ namespace ScannerTestApp
 
             //MoveFiles(lst);
         }
+        public Bitmap PreprocessForBarcode(Bitmap file)
+        {
+                Bitmap resized = new Bitmap(800, 600);
+                using (Graphics g = Graphics.FromImage(resized))
+                {
+                    g.DrawImage(file, 0, 0, 800, 600);
+                }
+                return resized;
+        }
         public string ReadText(string filepath, string filename ,Bitmap image)
         {
             try
@@ -119,21 +136,18 @@ namespace ScannerTestApp
                 {
                     throw new InvalidOperationException("Tesseract configuration is missing.");
                 }
-
+                var processedImage = PreprocessImageForOCR(filepath);
                 using (var engine = new TesseractEngine(tessDataPath, language, EngineMode.Default))
                 {
                     engine.SetVariable("debug_file", "tesseract_log.txt");
                     using (var img = Pix.LoadFromFile(filepath))
                     {
-                        using (var processedImage = PreprocessImage(img))
-                        {
                             using (var page = engine.Process(img))
                             {
                                 string text = page.GetText();
                                 string textWithoutWhitespace = Regex.Replace(text, @"\s+", "");
                                 return textWithoutWhitespace;
                             }
-                        }
                     }
                 }
             }
@@ -142,15 +156,75 @@ namespace ScannerTestApp
             }
             
         }
-        public Pix PreprocessImage(Pix img)
+        public Bitmap PreprocessImageForOCR(string filepath)
         {
-            // Convert to grayscale if needed
-            var grayImg = img.ConvertRGBToGray(); 
-
-            var binaryImg = grayImg.ConvertTo1Bit(128);
-
-            return binaryImg;
+            Bitmap bitmap = (Bitmap)Bitmap.FromFile(filepath);
+            if (!IsImage32DPP(bitmap))
+            {
+               bitmap =  ConvertImageTo32DPI(bitmap);
+            }
+            bitmap = ConvertToGrayscale(bitmap);
+            bitmap = BinarizeImage(bitmap);
+            return bitmap;
         }
+
+        public static bool IsImage32DPP(Bitmap image)
+        {
+                int pixelCount = image.Width * image.Height;
+                float dpp = pixelCount / (float)(image.Width * image.Height); 
+                const float tolerance = 0.01f; 
+                return Math.Abs(dpp - 32f) < tolerance;
+        }
+        public static Bitmap ConvertImageTo32DPI(Bitmap image)
+        {
+                Bitmap newBitmap = new Bitmap(image.Width, image.Height);
+
+                newBitmap.SetResolution(32, 32);
+
+                using (Graphics graphics = Graphics.FromImage(newBitmap))
+                {
+                    graphics.DrawImage(image, 0, 0, image.Width, image.Height);
+                }
+
+                return newBitmap;
+           
+        }
+        static Bitmap ConvertToGrayscale(Bitmap original)
+        {
+            Bitmap newBitmap = new Bitmap(original.Width, original.Height);
+            using (Graphics g = Graphics.FromImage(newBitmap))
+            {
+                ColorMatrix colorMatrix = new ColorMatrix(
+                   new float[][]
+                   {
+                      new float[] { 0.3f, 0.3f, 0.3f, 0, 0 },
+                      new float[] { 0.59f, 0.59f, 0.59f, 0, 0 },
+                      new float[] { 0.11f, 0.11f, 0.11f, 0, 0 },
+                      new float[] { 0, 0, 0, 1, 0 },
+                      new float[] { 0, 0, 0, 0, 1 }
+                   });
+                ImageAttributes attributes = new ImageAttributes();
+                attributes.SetColorMatrix(colorMatrix);
+                g.DrawImage(original, new Rectangle(0, 0, original.Width, original.Height), 0, 0, original.Width, original.Height, GraphicsUnit.Pixel, attributes);
+            }
+            return newBitmap;
+        }
+
+        static Bitmap BinarizeImage(Bitmap original)
+        {
+            Bitmap binarized = new Bitmap(original.Width, original.Height);
+            for (int y = 0; y < original.Height; y++)
+            {
+                for (int x = 0; x < original.Width; x++)
+                {
+                    Color pixelColor = original.GetPixel(x, y);
+                    int grayValue = (pixelColor.R + pixelColor.G + pixelColor.B) / 3;
+                    binarized.SetPixel(x, y, grayValue < 128 ? Color.Black : Color.White);
+                }
+            }
+            return binarized;
+        }
+
         public Bitmap OtsuBinarization(Bitmap grayscaleImage)
         {
             // Create histogram
@@ -222,20 +296,20 @@ namespace ScannerTestApp
 
             return binaryImage;
         }
-        public Bitmap ConvertToGrayscale(Bitmap original)
-        {
-            Bitmap grayImage = new Bitmap(original.Width, original.Height);
-            for (int y = 0; y < original.Height; y++)
-            {
-                for (int x = 0; x < original.Width; x++)
-                {
-                    Color pixelColor = original.GetPixel(x, y);
-                    int grayValue = (int)(pixelColor.R * 0.3 + pixelColor.G * 0.59 + pixelColor.B * 0.11);
-                    grayImage.SetPixel(x, y, Color.FromArgb(grayValue, grayValue, grayValue));
-                }
-            }
-            return grayImage;
-        }
+        //public Bitmap ConvertToGrayscale(Bitmap original)
+        //{
+        //    Bitmap grayImage = new Bitmap(original.Width, original.Height);
+        //    for (int y = 0; y < original.Height; y++)
+        //    {
+        //        for (int x = 0; x < original.Width; x++)
+        //        {
+        //            Color pixelColor = original.GetPixel(x, y);
+        //            int grayValue = (int)(pixelColor.R * 0.3 + pixelColor.G * 0.59 + pixelColor.B * 0.11);
+        //            grayImage.SetPixel(x, y, Color.FromArgb(grayValue, grayValue, grayValue));
+        //        }
+        //    }
+        //    return grayImage;
+        //}
         private void MoveFiles(List<string> lst)
         {
             if (lst != null)
